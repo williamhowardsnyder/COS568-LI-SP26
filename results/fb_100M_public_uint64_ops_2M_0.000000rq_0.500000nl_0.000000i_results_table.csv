@@ -1,0 +1,7 @@
+index_name,build_time_ns1,build_time_ns2,build_time_ns3,index_size_bytes,lookup_throughput_mops1,lookup_throughput_mops2,lookup_throughput_mops3,search_method,value
+BTree,1340482,1331727,1332028,2125000432,1.38103,1.38013,1.39583,LinearSearch,6
+BTree,924276,921897,934292,1856251088,1.44785,1.37156,1.33018,LinearSearch,8
+BTree,1206140,1224726,1207668,2125000432,1.04902,1.02678,1.03901,InterpolationSearch,6
+DynamicPGM,5745643,5720602,5734772,1721297388,1.95264,1.86092,1.98373,LinearSearch,16
+DynamicPGM,4995112,4997228,5002854,1702563708,1.53357,1.53477,1.52571,BinarySearch,128
+DynamicPGM,5733741,5725327,5713546,1721297388,1.5885,1.59062,1.64,BinarySearch,16
