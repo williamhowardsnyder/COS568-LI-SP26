@@ -111,8 +111,12 @@ class HybridPGMLIPP : public Competitor<KeyType, SearchClass> {
   }
 
   // Naive flush: iterate DPGM in sorted order, insert each item into LIPP.
+  // Note: pgm_.begin() would trigger a buggy 3-arg iterator constructor in the
+  // modified DynamicPGMIndex; pgm_.lower_bound(min_key) uses the working 4-arg
+  // constructor and returns an equivalent start-of-range iterator.
   void Flush() {
-    for (auto it = pgm_.begin(); it != pgm_.end(); ++it) {
+    auto it = pgm_.lower_bound(KeyType(0));
+    for (; it != pgm_.end(); ++it) {
       lipp_.insert(it->key(), it->value());
     }
     // Reset DPGM to an empty container.
