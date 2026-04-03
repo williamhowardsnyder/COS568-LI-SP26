@@ -1,5 +1,8 @@
 #! /usr/bin/env bash
 
+set -euo pipefail
+set -x
+
 echo "Executing benchmark and saving results..."
 
 BENCHMARK=build/benchmark

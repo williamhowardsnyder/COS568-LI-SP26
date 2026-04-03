@@ -11,9 +11,9 @@
 #include "pgm_index_dynamic.hpp"
 
 template <class KeyType, class SearchClass, size_t pgm_error>
-class DynamicPGM : public Competitor<KeyType, SearchClass> {
+class Hybrid_DyanmicPGM_LIPP : public Competitor<KeyType, SearchClass> {
  public:
-  DynamicPGM(const std::vector<int>& params){}
+  Hybrid_DyanmicPGM_LIPP(const std::vector<int>& params){}
   
   uint64_t Build(const std::vector<KeyValue<KeyType>>& data, size_t num_threads) {
     std::vector<std::pair<KeyType, uint64_t>> loading_data;
