@@ -21,8 +21,11 @@ echo "Step 3: Generating lookup workloads..."
 echo "Step 4: Building benchmark..."
 ./scripts/build_benchmark.sh
 
-echo "Step 5: Running benchmarks..."
-./scripts/run_benchmarks.sh
+# echo "Step 5: Running benchmarks..."
+# ./scripts/run_benchmarks.sh
 
-echo "=== Benchmark completed successfully ==="
-echo "Check results in the 'results' directory."
+# echo "=== Benchmark completed successfully ==="
+# echo "Check results in the 'results' directory."
+
+
+echo "Run benchmarks on Slurm cluster"

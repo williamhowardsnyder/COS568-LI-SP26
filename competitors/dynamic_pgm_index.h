@@ -14,6 +14,7 @@ template <class KeyType, class SearchClass, size_t pgm_error>
 class DynamicPGM : public Competitor<KeyType, SearchClass> {
  public:
   DynamicPGM(const std::vector<int>& params){}
+  
   uint64_t Build(const std::vector<KeyValue<KeyType>>& data, size_t num_threads) {
     std::vector<std::pair<KeyType, uint64_t>> loading_data;
     loading_data.reserve(data.size());
