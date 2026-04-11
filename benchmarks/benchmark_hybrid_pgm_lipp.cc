@@ -4,6 +4,7 @@
 #include "benchmarks/common.h"
 #include "competitors/hybrid_pgm_lipp.h"
 
+// NOTE: this file was generated using Claude Code
 // ---------------------------------------------------------------------------
 // Pareto sweep: vary both pgm_error and flush threshold.
 // ---------------------------------------------------------------------------
