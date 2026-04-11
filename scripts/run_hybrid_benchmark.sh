@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# NOTE: this file was generated using Claude Code
+
 # Run Milestone 2 benchmarks: compare DPGM, LIPP, and HybridPGMLIPP on
 # the two mixed workloads (10% insert / 90% insert) for Facebook dataset.
 # For a full sweep add books_100M_public_uint64 and osmc_100M_public_uint64.
