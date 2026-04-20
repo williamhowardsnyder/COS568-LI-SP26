@@ -18,3 +18,4 @@ results/
 
 analysis_results/
 *.png
+*.out

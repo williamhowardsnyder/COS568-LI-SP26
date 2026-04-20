@@ -54,6 +54,8 @@ def extract_metrics(df, indexes):
         else:
             throughputs[idx] = row["avg_throughput"]
             sizes[idx]       = row["index_size_bytes"] / (1024 ** 2)  # MB
+        print(idx)
+        print(row)
     return throughputs, sizes
 
 
@@ -85,13 +87,13 @@ def main():
     )
 
     plot_bar(axs[0, 0], thr_10, INDEXES,
-             "Throughput – 90% Lookup / 10% Insert", "Throughput (Mops/s)")
+             "Throughput - 90% Lookup / 10% Insert", "Throughput (Mops/s)")
     plot_bar(axs[0, 1], sz_10, INDEXES,
-             "Index Size – 90% Lookup / 10% Insert", "Index Size (MB)")
+             "Index Size - 90% Lookup / 10% Insert", "Index Size (MB)")
     plot_bar(axs[1, 0], thr_90, INDEXES,
-             "Throughput – 10% Lookup / 90% Insert", "Throughput (Mops/s)")
+             "Throughput - 10% Lookup / 90% Insert", "Throughput (Mops/s)")
     plot_bar(axs[1, 1], sz_90, INDEXES,
-             "Index Size – 10% Lookup / 90% Insert", "Index Size (MB)")
+             "Index Size - 10% Lookup / 90% Insert", "Index Size (MB)")
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
 
