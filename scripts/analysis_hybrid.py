@@ -1,4 +1,6 @@
 """
+NOTE: this file was generated using Claude Code
+
 Milestone 2 analysis: compare DynamicPGM, LIPP, and HybridPGMLIPP on the
 Facebook dataset for two mixed workloads.
 

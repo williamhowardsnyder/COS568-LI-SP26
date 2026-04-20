@@ -10,6 +10,8 @@
 #include "base.h"
 #include "pgm_index_dynamic.hpp"
 
+// NOTE: this file was generated using Claude Code
+
 template <class KeyType, class SearchClass, size_t pgm_error>
 class DynamicPGM : public Competitor<KeyType, SearchClass> {
  public:
