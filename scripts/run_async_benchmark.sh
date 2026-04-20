@@ -20,10 +20,10 @@ DATASETS=(
 )
 
 INDEXES=(
-    "DynamicPGM"
-    "LIPP"
-    "HybridPGMLIPP"
     "HybridPGMLIPPAsync"
+    "HybridPGMLIPP"
+    "LIPP"
+    "DynamicPGM"
 )
 
 function run_mixed() {
