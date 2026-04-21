@@ -29,7 +29,7 @@
 //      writes to LIPP when flushing_=true. When flushing_=false the client
 //      can read LIPP without acquiring any lock.
 template <class KeyType, class SearchClass, size_t pgm_error,
-          size_t flush_threshold_pct = 5>
+          size_t flush_threshold_permille = 50>  // per-mille; 50 = 5%
 class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   using PGMType  = PGMIndex<KeyType, SearchClass, pgm_error, 16>;
   using DPGMType = DynamicPGMIndex<KeyType, uint64_t, SearchClass, PGMType>;
@@ -61,7 +61,7 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
 
     // Size bloom filters for the expected number of keys per flush cycle.
     size_t expected_per_flush =
-        std::max(size_t(1000), total_keys_ * flush_threshold_pct / 100);
+        std::max(size_t(1000), total_keys_ * flush_threshold_permille / 1000);
     active_bloom_.init(expected_per_flush);
     shadow_bloom_.init(expected_per_flush);
 
@@ -209,12 +209,12 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
 
   std::vector<std::string> variants() const {
     return {SearchClass::name(), std::to_string(pgm_error),
-            std::to_string(flush_threshold_pct)};
+            std::to_string(flush_threshold_permille)};
   }
 
  private:
   void UpdateThreshold() {
-    flush_threshold_ = std::max(size_t(1), total_keys_ * flush_threshold_pct / 100);
+    flush_threshold_ = std::max(size_t(1), total_keys_ * flush_threshold_permille / 1000);
   }
 
   void RunFlushThread() {
