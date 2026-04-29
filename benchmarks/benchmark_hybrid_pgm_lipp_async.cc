@@ -5,22 +5,14 @@
 #include "competitors/hybrid_pgm_lipp_async.h"
 
 // ---------------------------------------------------------------------------
-// Pareto sweep: pgm_error × flush_threshold_permille.
+// Pareto sweep: pgm_error × fixed flush_threshold_keys.
 //
-// Threshold is per-mille (1/1000) of initial key count.  With 100M initial
-// keys: permille=1→100K, permille=3→300K, permille=5→500K, permille=10→1M.
-//
-// For the 90%Lkp/10%Ins workload (200K total inserts):
-//   permille=1 → flush at 100K → 2 flushes; DPGM stays ≤100K entries.
-//   permille=2 → flush at 200K → 1 flush.
-//   permille≥5 → threshold ≥ 500K > 200K inserts → never flushes.
-//
-// For the 10%Lkp/90%Ins workload (1.8M total inserts):
-//   permille=1  → ~18 flushes; DPGM stays ≤100K.
-//   permille=3  → ~6 flushes; DPGM stays ≤300K.
-//   permille=5  → ~3 flushes; DPGM stays ≤500K.
-//   permille=10 → ~2 flushes; DPGM stays ≤1M.
-//   permille≥20 → threshold ≥ 2M > 1.8M inserts → never flushes.
+// Absolute thresholds make the hybrid much easier to reason about than a
+// moving "percent of total keys" rule:
+//   8K   → keep DPGM tiny, but flush very frequently
+//   32K  → moderate lookup-heavy setting
+//   128K → a single flush on the 90%Lkp/10%Ins workload
+//   256K+→ no flush at all on the 90%Lkp/10%Ins workload
 // ---------------------------------------------------------------------------
 template <typename Searcher>
 void benchmark_64_hybrid_pgm_lipp_async(tli::Benchmark<uint64_t>& benchmark,
@@ -29,43 +21,52 @@ void benchmark_64_hybrid_pgm_lipp_async(tli::Benchmark<uint64_t>& benchmark,
   if (!pareto) {
     util::fail("HybridPGMLIPPAsync hyperparameters cannot be set via params");
   }
-  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher,  64,  1>>();
-  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher,  64,  2>>();
-  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher,  64,  3>>();
-  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher,  64,  5>>();
-  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher,  64, 10>>();
-  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher, 128,  1>>();
-  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher, 128,  2>>();
-  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher, 128,  3>>();
-  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher, 128,  5>>();
-  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher, 128, 10>>();
+  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher,  64,   8192>>();
+  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher,  64,  16384>>();
+  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher,  64,  32768>>();
+  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher,  64,  65536>>();
+  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher,  64, 131072>>();
+  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher,  64, 262144>>();
+  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher,  64, 524288>>();
+  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher, 128,   8192>>();
+  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher, 128,  16384>>();
+  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher, 128,  32768>>();
+  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher, 128,  65536>>();
+  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher, 128, 131072>>();
+  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher, 128, 262144>>();
+  benchmark.template Run<HybridPGMLIPPAsync<uint64_t, Searcher, 128, 524288>>();
 }
 
 // ---------------------------------------------------------------------------
-// Auto-select: workload-aware permille values per dataset.
+// Auto-select: workload-aware fixed thresholds per dataset.
 // ---------------------------------------------------------------------------
 template <int record>
 void benchmark_64_hybrid_pgm_lipp_async(tli::Benchmark<uint64_t>& benchmark,
                                           const std::string& filename) {
-  // Lookup-heavy: keep DPGM tiny so bloom filter rarely fires and LIPP takes
-  // all lookups.  permille=1 and 2 are the only values that trigger flushes.
+  // Lookup-heavy: try genuinely small write buffers so lookups mostly see a
+  // near-empty DPGM and flushes happen at predictable points.
   auto run_lookup_heavy = [&]() {
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64, 1>>();
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64, 2>>();
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 1>>();
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 2>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64,   8192>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64,  16384>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64,  32768>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64,  65536>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,   8192>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,  16384>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,  32768>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,  65536>>();
   };
 
-  // Insert-heavy: flush frequently so DPGM stays small during 1.8M inserts.
+  // Insert-heavy: larger buffers reduce flush churn, but still trigger enough
+  // migrations during 1.8M inserts to exercise the hybrid design.
   auto run_insert_heavy = [&]() {
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64,  1>>();
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64,  3>>();
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64,  5>>();
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64, 10>>();
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,  1>>();
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,  3>>();
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,  5>>();
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 10>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64,  65536>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64, 131072>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64, 262144>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64, 524288>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,  65536>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 131072>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 262144>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 524288>>();
   };
 
   bool is_lookup_heavy = filename.find("0.100000i") != std::string::npos;

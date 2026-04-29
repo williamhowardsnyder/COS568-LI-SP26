@@ -28,8 +28,11 @@
 //   3. Lock-free LIPP reads on the fast path: the background thread only
 //      writes to LIPP when flushing_=true. When flushing_=false the client
 //      can read LIPP without acquiring any lock.
+//   4. Fixed flush threshold: use an absolute key-count cutoff rather than a
+//      threshold that grows with total_keys_. This keeps workload tuning
+//      predictable: a 32K threshold always means "flush after ~32K inserts."
 template <class KeyType, class SearchClass, size_t pgm_error,
-          size_t flush_threshold_permille = 50>  // per-mille; 50 = 5%
+          size_t flush_threshold_keys = 100000>
 class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   using PGMType  = PGMIndex<KeyType, SearchClass, pgm_error, 16>;
   using DPGMType = DynamicPGMIndex<KeyType, uint64_t, SearchClass, PGMType>;
@@ -55,13 +58,11 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
     for (const auto& itm : data) {
       loading_data.emplace_back(itm.key, itm.value);
     }
-    total_keys_   = data.size();
     active_count_ = 0;
-    UpdateThreshold();
+    flush_threshold_ = std::max(size_t(1), flush_threshold_keys);
 
     // Size bloom filters for the expected number of keys per flush cycle.
-    size_t expected_per_flush =
-        std::max(size_t(1000), total_keys_ * flush_threshold_permille / 1000);
+    size_t expected_per_flush = std::max(size_t(1000), flush_threshold_);
     active_bloom_.init(expected_per_flush);
     shadow_bloom_.init(expected_per_flush);
 
@@ -98,7 +99,7 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
     // -----------------------------------------------------------------------
 
     // Check active DPGM (client thread only — no lock needed).
-    if (active_bloom_.probably_contains(lookup_key)) {
+    if (active_count_ > 0 && active_bloom_.probably_contains(lookup_key)) {
       auto it = active_dpgm_.find(lookup_key);
       if (it != active_dpgm_.end()) return it->value();
     }
@@ -172,8 +173,6 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
     active_dpgm_.insert(data.key, data.value);
     active_bloom_.insert(static_cast<uint64_t>(data.key));
     ++active_count_;
-    ++total_keys_;
-    UpdateThreshold();
 
     if (active_count_ >= flush_threshold_ &&
         !flushing_.load(std::memory_order_acquire)) {
@@ -209,17 +208,13 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
 
   std::vector<std::string> variants() const {
     return {SearchClass::name(), std::to_string(pgm_error),
-            std::to_string(flush_threshold_permille)};
+            std::to_string(flush_threshold_keys)};
   }
 
  private:
   // Amortize lock/unlock overhead across a small chunk of migrated keys
   // without blocking slow-path lookups for an entire flush.
   static constexpr size_t kFlushBatchSize = 256;
-
-  void UpdateThreshold() {
-    flush_threshold_ = std::max(size_t(1), total_keys_ * flush_threshold_permille / 1000);
-  }
 
   void RunFlushThread() {
     while (true) {
@@ -281,7 +276,6 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   std::mutex              flush_cv_mutex_;
   std::condition_variable flush_cv_;
 
-  size_t total_keys_      = 0;
   size_t active_count_    = 0;
   size_t flush_threshold_ = 0;
 };
