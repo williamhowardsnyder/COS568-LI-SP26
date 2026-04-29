@@ -213,6 +213,10 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   }
 
  private:
+  // Amortize lock/unlock overhead across a small chunk of migrated keys
+  // without blocking slow-path lookups for an entire flush.
+  static constexpr size_t kFlushBatchSize = 256;
+
   void UpdateThreshold() {
     flush_threshold_ = std::max(size_t(1), total_keys_ * flush_threshold_permille / 1000);
   }
@@ -230,14 +234,19 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
       }
 
       if (do_flush) {
-        // Drain shadow_dpgm_ into lipp_.  We release lipp_mutex_ between
-        // items so that client lookups on the slow path can interleave.
+        // Drain shadow_dpgm_ into lipp_ in chunks. This keeps the number of
+        // expensive write-lock acquisitions low without fully monopolizing
+        // LIPP for the whole flush.
         {
           std::shared_lock<std::shared_mutex> sl(shadow_smutex_);
           auto it = shadow_dpgm_.lower_bound(KeyType(0));
-          for (; it != shadow_dpgm_.end(); ++it) {
+          while (it != shadow_dpgm_.end()) {
             std::unique_lock<std::shared_mutex> wl(lipp_mutex_);
-            lipp_.insert(it->key(), it->value());
+            for (size_t batch = 0;
+                 batch < kFlushBatchSize && it != shadow_dpgm_.end();
+                 ++batch, ++it) {
+              lipp_.insert(it->key(), it->value());
+            }
           }
         }
 
