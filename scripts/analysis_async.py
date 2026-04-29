@@ -2,7 +2,7 @@
 Milestone 3 analysis: compare DynamicPGM, LIPP, HybridPGMLIPP (M2 naive),
 and HybridPGMLIPPAsync (M3 async) on mixed workloads across all three datasets.
 
-Produces one figure per dataset (3 total), each with a 2×2 layout:
+Produces one figure per dataset (3 total), each with a 2x2 layout:
   row 0: throughput for 90%Lkp/10%Ins | throughput for 10%Lkp/90%Ins
   row 1: index size  for 90%Lkp/10%Ins | index size  for 10%Lkp/90%Ins
 """

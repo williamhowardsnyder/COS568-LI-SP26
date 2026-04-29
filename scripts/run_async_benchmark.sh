@@ -21,8 +21,8 @@ DATASETS=(
 
 INDEXES=(
     "HybridPGMLIPPAsync"
-    "HybridPGMLIPP"
     "LIPP"
+    "HybridPGMLIPP"
     "DynamicPGM"
 )
 
