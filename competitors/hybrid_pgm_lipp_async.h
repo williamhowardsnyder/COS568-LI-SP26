@@ -39,8 +39,7 @@
 //      benchmark knob so lookup-heavy runs can trade cache footprint against
 //      unnecessary DPGM/LIPP probes.
 template <class KeyType, class SearchClass, size_t pgm_error,
-          size_t flush_threshold_keys = 100000,
-          size_t bloom_fpr_per_thousand = 10>
+          size_t flush_threshold_keys = 100000>
 class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   using PGMType = PGMIndex<KeyType, SearchClass, pgm_error, 16>;
   using DPGMType = DynamicPGMIndex<KeyType, uint64_t, SearchClass, PGMType>;
@@ -60,6 +59,11 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
  public:
   HybridPGMLIPPAsync(const std::vector<int>& params)
       : shutdown_(false), flushing_(false) {
+    if (!params.empty()) {
+      bloom_fpr_per_thousand_ =
+          std::max<size_t>(1, static_cast<size_t>(params[0]));
+    }
+    bloom_fpr_ = static_cast<double>(bloom_fpr_per_thousand_) / 1000.0;
     flush_thread_ = std::thread(&HybridPGMLIPPAsync::RunFlushThread, this);
   }
 
@@ -99,9 +103,8 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
     ResetCounters();
 
     size_t expected_per_flush = std::max(size_t(1000), flush_threshold_);
-    const double bloom_fpr = BloomFpr();
-    active_bloom_.init(expected_per_flush, bloom_fpr);
-    shadow_bloom_.init(expected_per_flush, bloom_fpr);
+    active_bloom_.init(expected_per_flush, bloom_fpr_);
+    shadow_bloom_.init(expected_per_flush, bloom_fpr_);
 
     uint64_t build_time = util::timing([&] {
       base_lipp_.bulk_load(loading_data.data(),
@@ -286,13 +289,9 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   }
 
  private:
-  static constexpr double BloomFpr() {
-    return static_cast<double>(bloom_fpr_per_thousand) / 1000.0;
-  }
-
-  static std::string BloomFprString() {
+  std::string BloomFprString() const {
     std::ostringstream out;
-    out << std::fixed << std::setprecision(3) << BloomFpr();
+    out << std::fixed << std::setprecision(3) << bloom_fpr_;
     return out.str();
   }
 
@@ -428,7 +427,7 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
     auto next_delta = std::make_shared<DeltaRun>();
     next_delta->count = merged.size();
     next_delta->bloom.init(std::max(size_t(1000), next_delta->count),
-                           BloomFpr());
+                           bloom_fpr_);
     for (const auto& kv : merged) {
       next_delta->bloom.insert(static_cast<uint64_t>(kv.first));
     }
@@ -487,6 +486,9 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   std::thread flush_thread_;
   std::mutex flush_cv_mutex_;
   std::condition_variable flush_cv_;
+
+  size_t bloom_fpr_per_thousand_ = 10;
+  double bloom_fpr_ = 0.010;
 
   std::string workload_name_;
   size_t repeat_ordinal_ = 0;

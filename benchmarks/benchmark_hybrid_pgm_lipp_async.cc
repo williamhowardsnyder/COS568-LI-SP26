@@ -23,25 +23,25 @@
 template <typename Searcher, size_t pgm_error, size_t flush_threshold_keys>
 void run_hybrid_async_fpr_sweep(tli::Benchmark<uint64_t>& benchmark) {
   benchmark.template Run<
-      HybridPGMLIPPAsync<uint64_t, Searcher, pgm_error, flush_threshold_keys,
-                         5>>();
+      HybridPGMLIPPAsync<uint64_t, Searcher, pgm_error, flush_threshold_keys>>(
+      {5});
   benchmark.template Run<
-      HybridPGMLIPPAsync<uint64_t, Searcher, pgm_error, flush_threshold_keys,
-                         10>>();
+      HybridPGMLIPPAsync<uint64_t, Searcher, pgm_error, flush_threshold_keys>>(
+      {10});
   benchmark.template Run<
-      HybridPGMLIPPAsync<uint64_t, Searcher, pgm_error, flush_threshold_keys,
-                         50>>();
+      HybridPGMLIPPAsync<uint64_t, Searcher, pgm_error, flush_threshold_keys>>(
+      {50});
   benchmark.template Run<
-      HybridPGMLIPPAsync<uint64_t, Searcher, pgm_error, flush_threshold_keys,
-                         200>>();
+      HybridPGMLIPPAsync<uint64_t, Searcher, pgm_error, flush_threshold_keys>>(
+      {200});
 }
 
 template <typename Searcher>
 void benchmark_64_hybrid_pgm_lipp_async(tli::Benchmark<uint64_t>& benchmark,
                                           bool pareto,
                                           const std::vector<int>& params) {
-  if (!pareto) {
-    util::fail("HybridPGMLIPPAsync hyperparameters cannot be set via params");
+  if (!pareto && !params.empty()) {
+    util::fail("HybridPGMLIPPAsync runtime params are only supported in pareto mode");
   }
   run_hybrid_async_fpr_sweep<Searcher, 64, 32768>(benchmark);
   run_hybrid_async_fpr_sweep<Searcher, 64, 65536>(benchmark);
@@ -96,53 +96,53 @@ void benchmark_64_hybrid_pgm_lipp_async(tli::Benchmark<uint64_t>& benchmark,
   // smaller FPR sweep here so we do not explode the total benchmark count.
   auto run_insert_heavy = [&]() {
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64, 65536,
-                           10>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64, 65536>>(
+        {10});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64, 65536,
-                           50>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64, 65536>>(
+        {50});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64, 131072,
-                           10>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64,
+                           131072>>({10});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64, 131072,
-                           50>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64,
+                           131072>>({50});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64, 262144,
-                           10>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64,
+                           262144>>({10});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64, 262144,
-                           50>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64,
+                           262144>>({50});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64, 524288,
-                           10>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64,
+                           524288>>({10});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64, 524288,
-                           50>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 64,
+                           524288>>({50});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 65536,
-                           10>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,
+                           65536>>({10});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 65536,
-                           50>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,
+                           65536>>({50});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 131072,
-                           10>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,
+                           131072>>({10});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 131072,
-                           50>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,
+                           131072>>({50});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 262144,
-                           10>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,
+                           262144>>({10});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 262144,
-                           50>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,
+                           262144>>({50});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 524288,
-                           10>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,
+                           524288>>({10});
     benchmark.template Run<
-        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 524288,
-                           50>>();
+        HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,
+                           524288>>({50});
   };
 
   bool is_lookup_heavy = filename.find("0.100000i") != std::string::npos;
