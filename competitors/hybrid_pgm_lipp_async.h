@@ -5,6 +5,8 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
+#include <limits>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
@@ -16,26 +18,36 @@
 #include "pgm_index_dynamic.hpp"
 #include "./lipp/src/core/lipp.h"
 
-// Async hybrid index: DPGM absorbs inserts, LIPP serves lookups.
+// Async hybrid index: DPGM absorbs inserts, while immutable LIPP instances
+// serve most lookups.
 //
 // Key design decisions:
-//   1. Double-buffered DPGM: active_dpgm_ receives inserts; when it hits the
-//      flush threshold it is atomically swapped with shadow_dpgm_ and a
-//      background thread drains shadow→LIPP without blocking the client.
-//   2. Bloom filters on each DPGM buffer: before doing an expensive DPGM
-//      traversal, we check the corresponding bloom filter. A "definitely not
-//      here" answer lets us skip the DPGM entirely (~10ns vs ~200ns).
-//   3. Lock-free LIPP reads on the fast path: the background thread only
-//      writes to LIPP when flushing_=true. When flushing_=false the client
-//      can read LIPP without acquiring any lock.
-//   4. Fixed flush threshold: use an absolute key-count cutoff rather than a
-//      threshold that grows with total_keys_. This keeps workload tuning
-//      predictable: a 32K threshold always means "flush after ~32K inserts."
+//   1. Double-buffered DPGM: active_dpgm_ receives inserts; when it fills, it
+//      is swapped into shadow_dpgm_ and flushed in the background.
+//   2. Immutable LIPP layers: the initial dataset lives in base_lipp_ forever.
+//      Flushed keys are bulk-loaded into a small delta_lipp_ instead of being
+//      inserted one-by-one into the large base LIPP.
+//   3. Bloom filters on the mutable buffers and delta LIPP: before touching an
+//      expensive structure, check a cheap approximate-membership filter.
+//   4. Workload-tunable flush threshold: use an absolute key-count cutoff so a
+//      threshold like 64K has the same meaning on every dataset.
 template <class KeyType, class SearchClass, size_t pgm_error,
           size_t flush_threshold_keys = 100000>
 class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
-  using PGMType  = PGMIndex<KeyType, SearchClass, pgm_error, 16>;
+  using PGMType = PGMIndex<KeyType, SearchClass, pgm_error, 16>;
   using DPGMType = DynamicPGMIndex<KeyType, uint64_t, SearchClass, PGMType>;
+  using LIPPType = LIPP<KeyType, uint64_t>;
+  using KVPair = std::pair<KeyType, uint64_t>;
+
+  struct DeltaRun {
+    LIPPType lipp;
+    BloomFilter bloom;
+    size_t count = 0;
+
+    size_t size_in_bytes() const {
+      return lipp.index_size() + bloom.size_in_bytes();
+    }
+  };
 
  public:
   HybridPGMLIPPAsync(const std::vector<int>& params)
@@ -53,73 +65,72 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   }
 
   uint64_t Build(const std::vector<KeyValue<KeyType>>& data, size_t num_threads) {
-    std::vector<std::pair<KeyType, uint64_t>> loading_data;
+    std::vector<KVPair> loading_data;
     loading_data.reserve(data.size());
     for (const auto& itm : data) {
       loading_data.emplace_back(itm.key, itm.value);
     }
+
+    active_dpgm_ = DPGMType();
+    {
+      std::unique_lock<std::shared_mutex> sl(shadow_smutex_);
+      shadow_dpgm_ = DPGMType();
+      shadow_bloom_.reset();
+      shadow_count_ = 0;
+    }
+    {
+      std::unique_lock<std::shared_mutex> dl(delta_smutex_);
+      delta_run_.reset();
+    }
+
     active_count_ = 0;
     flush_threshold_ = std::max(size_t(1), flush_threshold_keys);
+    flushing_.store(false, std::memory_order_release);
 
-    // Size bloom filters for the expected number of keys per flush cycle.
     size_t expected_per_flush = std::max(size_t(1000), flush_threshold_);
     active_bloom_.init(expected_per_flush);
     shadow_bloom_.init(expected_per_flush);
 
-    uint64_t build_time =
-        util::timing([&] { lipp_.bulk_load(loading_data.data(), loading_data.size()); });
+    uint64_t build_time = util::timing([&] {
+      base_lipp_.bulk_load(loading_data.data(),
+                           static_cast<int>(loading_data.size()));
+    });
     return build_time;
   }
 
   size_t EqualityLookup(const KeyType& lookup_key, uint32_t thread_id) const {
-    // -----------------------------------------------------------------------
-    // Fast path: no flush in progress.
-    //
-    // The background thread only writes to LIPP when flushing_=true. Loading
-    // flushing_=false with acquire semantics guarantees all previous LIPP
-    // writes are visible and no new ones will start until Insert() sets it
-    // back to true (which cannot happen concurrently since the client is
-    // single-threaded for !multithread workloads).  So we read LIPP without
-    // any lock.
-    // -----------------------------------------------------------------------
-    if (!flushing_.load(std::memory_order_acquire)) {
-      // Only touch active_dpgm_ if the bloom filter says the key might be there.
-      if (active_count_ > 0 && active_bloom_.probably_contains(lookup_key)) {
-        auto it = active_dpgm_.find(lookup_key);
-        if (it != active_dpgm_.end()) return it->value();
-      }
-      // Lock-free LIPP read — safe because flushing_=false.
-      uint64_t value;
-      if (lipp_.find(lookup_key, value)) return value;
-      return util::NOT_FOUND;
-    }
-
-    // -----------------------------------------------------------------------
-    // Slow path: flush in progress — use full synchronization.
-    // -----------------------------------------------------------------------
-
-    // Check active DPGM (client thread only — no lock needed).
+    // New inserts live in the foreground DPGM.
     if (active_count_ > 0 && active_bloom_.probably_contains(lookup_key)) {
       auto it = active_dpgm_.find(lookup_key);
       if (it != active_dpgm_.end()) return it->value();
     }
 
-    // Check shadow DPGM — background thread is reading it concurrently.
-    {
-      std::shared_lock<std::shared_mutex> sl(shadow_smutex_);
-      if (shadow_bloom_.probably_contains(lookup_key)) {
-        auto it2 = shadow_dpgm_.find(lookup_key);
-        if (it2 != shadow_dpgm_.end()) return it2->value();
+    // During a flush, hold shared locks across the shadow and delta checks so
+    // lookups see a consistent split of the "recently inserted" key space.
+    if (flushing_.load(std::memory_order_acquire)) {
+      std::shared_lock<std::shared_mutex> shadow_lock(shadow_smutex_);
+      std::shared_lock<std::shared_mutex> delta_lock(delta_smutex_);
+
+      if (shadow_count_ > 0 && shadow_bloom_.probably_contains(lookup_key)) {
+        auto it = shadow_dpgm_.find(lookup_key);
+        if (it != shadow_dpgm_.end()) return it->value();
+      }
+
+      if (delta_run_ && delta_run_->count > 0 &&
+          delta_run_->bloom.probably_contains(static_cast<uint64_t>(lookup_key))) {
+        uint64_t value;
+        if (delta_run_->lipp.find(lookup_key, value)) return value;
+      }
+    } else {
+      if (delta_run_ && delta_run_->count > 0 &&
+          delta_run_->bloom.probably_contains(static_cast<uint64_t>(lookup_key))) {
+        uint64_t value;
+        if (delta_run_->lipp.find(lookup_key, value)) return value;
       }
     }
 
-    // Check LIPP with shared lock.
-    {
-      std::shared_lock<std::shared_mutex> rl(lipp_mutex_);
-      uint64_t value;
-      if (lipp_.find(lookup_key, value)) return value;
-    }
-
+    uint64_t value;
+    if (base_lipp_.find(lookup_key, value)) return value;
     return util::NOT_FOUND;
   }
 
@@ -127,43 +138,46 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
                       uint32_t thread_id) const {
     uint64_t result = 0;
 
-    if (!flushing_.load(std::memory_order_acquire)) {
-      // Fast path: lock-free LIPP read + active DPGM.
-      auto lipp_it = lipp_.lower_bound(lower_key);
-      while (lipp_it != lipp_.end() && lipp_it->comp.data.key <= upper_key) {
-        result += lipp_it->comp.data.value;
-        ++lipp_it;
+    auto base_it = base_lipp_.lower_bound(lower_key);
+    while (base_it != base_lipp_.end() && base_it->comp.data.key <= upper_key) {
+      result += base_it->comp.data.value;
+      ++base_it;
+    }
+
+    auto active_it = active_dpgm_.lower_bound(lower_key);
+    while (active_it != active_dpgm_.end() && active_it->key() <= upper_key) {
+      result += active_it->value();
+      ++active_it;
+    }
+
+    if (flushing_.load(std::memory_order_acquire)) {
+      std::shared_lock<std::shared_mutex> shadow_lock(shadow_smutex_);
+      std::shared_lock<std::shared_mutex> delta_lock(delta_smutex_);
+
+      if (delta_run_) {
+        auto delta_it = delta_run_->lipp.lower_bound(lower_key);
+        while (delta_it != delta_run_->lipp.end() &&
+               delta_it->comp.data.key <= upper_key) {
+          result += delta_it->comp.data.value;
+          ++delta_it;
+        }
       }
-      auto dpgm_it = active_dpgm_.lower_bound(lower_key);
-      while (dpgm_it != active_dpgm_.end() && dpgm_it->key() <= upper_key) {
-        result += dpgm_it->value();
-        ++dpgm_it;
+
+      auto shadow_it = shadow_dpgm_.lower_bound(lower_key);
+      while (shadow_it != shadow_dpgm_.end() &&
+             shadow_it->key() <= upper_key) {
+        result += shadow_it->value();
+        ++shadow_it;
       }
       return result;
     }
 
-    // Slow path.
-    {
-      std::shared_lock<std::shared_mutex> rl(lipp_mutex_);
-      auto it = lipp_.lower_bound(lower_key);
-      while (it != lipp_.end() && it->comp.data.key <= upper_key) {
-        result += it->comp.data.value;
-        ++it;
-      }
-    }
-    {
-      auto it = active_dpgm_.lower_bound(lower_key);
-      while (it != active_dpgm_.end() && it->key() <= upper_key) {
-        result += it->value();
-        ++it;
-      }
-    }
-    {
-      std::shared_lock<std::shared_mutex> sl(shadow_smutex_);
-      auto it = shadow_dpgm_.lower_bound(lower_key);
-      while (it != shadow_dpgm_.end() && it->key() <= upper_key) {
-        result += it->value();
-        ++it;
+    if (delta_run_) {
+      auto delta_it = delta_run_->lipp.lower_bound(lower_key);
+      while (delta_it != delta_run_->lipp.end() &&
+             delta_it->comp.data.key <= upper_key) {
+        result += delta_it->comp.data.value;
+        ++delta_it;
       }
     }
     return result;
@@ -178,9 +192,9 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
         !flushing_.load(std::memory_order_acquire)) {
       {
         std::unique_lock<std::shared_mutex> sl(shadow_smutex_);
+        shadow_count_ = active_count_;
         std::swap(active_dpgm_, shadow_dpgm_);
         std::swap(active_bloom_, shadow_bloom_);
-        // active_bloom_ is now the old (reset) shadow_bloom_; reset for safety.
         active_bloom_.reset();
       }
       active_count_ = 0;
@@ -195,9 +209,17 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   std::string name() const { return "HybridPGMLIPPAsync"; }
 
   std::size_t size() const {
-    return active_dpgm_.size_in_bytes() + shadow_dpgm_.size_in_bytes() +
-           lipp_.index_size() + active_bloom_.size_in_bytes() +
-           shadow_bloom_.size_in_bytes();
+    size_t total = active_dpgm_.size_in_bytes() + active_bloom_.size_in_bytes() +
+                   base_lipp_.index_size();
+    {
+      std::shared_lock<std::shared_mutex> sl(shadow_smutex_);
+      total += shadow_dpgm_.size_in_bytes() + shadow_bloom_.size_in_bytes();
+    }
+    {
+      std::shared_lock<std::shared_mutex> dl(delta_smutex_);
+      if (delta_run_) total += delta_run_->size_in_bytes();
+    }
+    return total;
   }
 
   bool applicable(bool unique, bool range_query, bool insert, bool multithread,
@@ -212,9 +234,82 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   }
 
  private:
-  // Amortize lock/unlock overhead across a small chunk of migrated keys
-  // without blocking slow-path lookups for an entire flush.
-  static constexpr size_t kFlushBatchSize = 256;
+  static KeyType MinKey() {
+    return std::numeric_limits<KeyType>::lowest();
+  }
+
+  std::shared_ptr<DeltaRun> BuildDeltaRunFromShadowAndPrevious() const {
+    std::shared_ptr<DeltaRun> previous_delta;
+    {
+      std::shared_lock<std::shared_mutex> dl(delta_smutex_);
+      previous_delta = delta_run_;
+    }
+
+    std::vector<KVPair> merged;
+
+    std::shared_lock<std::shared_mutex> sl(shadow_smutex_);
+    merged.reserve((previous_delta ? previous_delta->count : 0) + shadow_count_);
+
+    auto shadow_it =
+        shadow_count_ == 0 ? shadow_dpgm_.end() : shadow_dpgm_.lower_bound(MinKey());
+    auto shadow_end = shadow_dpgm_.end();
+
+    if (previous_delta) {
+      auto delta_it = previous_delta->lipp.lower_bound(MinKey());
+      auto delta_end = previous_delta->lipp.end();
+
+      while (delta_it != delta_end && shadow_it != shadow_end) {
+        const KeyType delta_key = delta_it->comp.data.key;
+        const KeyType shadow_key = shadow_it->key();
+
+        if (delta_key < shadow_key) {
+          merged.emplace_back(delta_key, delta_it->comp.data.value);
+          ++delta_it;
+        } else if (shadow_key < delta_key) {
+          merged.emplace_back(shadow_key, shadow_it->value());
+          ++shadow_it;
+        } else {
+          // Newer flushed data wins if a duplicate ever slips in.
+          merged.emplace_back(shadow_key, shadow_it->value());
+          ++delta_it;
+          ++shadow_it;
+        }
+      }
+
+      while (delta_it != delta_end) {
+        merged.emplace_back(delta_it->comp.data.key, delta_it->comp.data.value);
+        ++delta_it;
+      }
+    }
+
+    while (shadow_it != shadow_end) {
+      merged.emplace_back(shadow_it->key(), shadow_it->value());
+      ++shadow_it;
+    }
+
+    sl.unlock();
+
+    if (merged.empty()) return nullptr;
+
+    auto next_delta = std::make_shared<DeltaRun>();
+    next_delta->count = merged.size();
+    next_delta->bloom.init(std::max(size_t(1000), next_delta->count));
+    for (const auto& kv : merged) {
+      next_delta->bloom.insert(static_cast<uint64_t>(kv.first));
+    }
+    next_delta->lipp.bulk_load(merged.data(), static_cast<int>(merged.size()));
+    return next_delta;
+  }
+
+  void PublishDeltaRun(std::shared_ptr<DeltaRun> next_delta) {
+    std::unique_lock<std::shared_mutex> shadow_lock(shadow_smutex_);
+    std::unique_lock<std::shared_mutex> delta_lock(delta_smutex_);
+
+    delta_run_ = std::move(next_delta);
+    shadow_dpgm_ = DPGMType();
+    shadow_bloom_.reset();
+    shadow_count_ = 0;
+  }
 
   void RunFlushThread() {
     while (true) {
@@ -229,29 +324,8 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
       }
 
       if (do_flush) {
-        // Drain shadow_dpgm_ into lipp_ in chunks. This keeps the number of
-        // expensive write-lock acquisitions low without fully monopolizing
-        // LIPP for the whole flush.
-        {
-          std::shared_lock<std::shared_mutex> sl(shadow_smutex_);
-          auto it = shadow_dpgm_.lower_bound(KeyType(0));
-          while (it != shadow_dpgm_.end()) {
-            std::unique_lock<std::shared_mutex> wl(lipp_mutex_);
-            for (size_t batch = 0;
-                 batch < kFlushBatchSize && it != shadow_dpgm_.end();
-                 ++batch, ++it) {
-              lipp_.insert(it->key(), it->value());
-            }
-          }
-        }
-
-        // Reset shadow structures under exclusive lock.
-        {
-          std::unique_lock<std::shared_mutex> sl(shadow_smutex_);
-          shadow_dpgm_ = DPGMType();
-          shadow_bloom_.reset();
-        }
-
+        auto next_delta = BuildDeltaRunFromShadowAndPrevious();
+        PublishDeltaRun(std::move(next_delta));
         flushing_.store(false, std::memory_order_release);
       }
 
@@ -259,24 +333,27 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
     }
   }
 
-  DPGMType         active_dpgm_;
+  DPGMType active_dpgm_;
   mutable DPGMType shadow_dpgm_;
-  mutable LIPP<KeyType, uint64_t> lipp_;
 
-  BloomFilter         active_bloom_;
+  mutable LIPPType base_lipp_;
+  mutable std::shared_ptr<DeltaRun> delta_run_;
+
+  BloomFilter active_bloom_;
   mutable BloomFilter shadow_bloom_;
 
-  mutable std::shared_mutex lipp_mutex_;
   mutable std::shared_mutex shadow_smutex_;
+  mutable std::shared_mutex delta_smutex_;
 
   std::atomic<bool> shutdown_;
   std::atomic<bool> flushing_;
 
-  std::thread             flush_thread_;
-  std::mutex              flush_cv_mutex_;
+  std::thread flush_thread_;
+  std::mutex flush_cv_mutex_;
   std::condition_variable flush_cv_;
 
-  size_t active_count_    = 0;
+  size_t active_count_ = 0;
+  size_t shadow_count_ = 0;
   size_t flush_threshold_ = 0;
 };
 
