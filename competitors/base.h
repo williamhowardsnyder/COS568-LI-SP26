@@ -32,6 +32,8 @@ class Base {
     return std::vector<std::string>();
   }
 
+  void set_benchmark_context(const std::string&, size_t) {}
+
   double searchAverageTime() const { return 0; }
   double searchLatency(uint64_t op_cnt) const { return 0; }
   double searchBound() const { return 0; }

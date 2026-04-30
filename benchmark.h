@@ -319,6 +319,7 @@ class Benchmark {
   void Run(const std::vector<int>& params = std::vector<int>()) {
     // Build index.
     Index* index = new Index(params);
+    index->set_benchmark_context(dataset_name_, 0);
 
     if (!index->applicable(unique_keys_, is_range_query_, insert_ratio_ > 0, num_threads_ > 1, dataset_name_)) {
       std::cout << "Index " << index->name() << " is not applicable"
@@ -349,6 +350,7 @@ class Benchmark {
         delete index;
         index = new Index(params);
       }
+      index->set_benchmark_context(dataset_name_, i);
 
       build_ns_.push_back(index->Build(index_data_, num_threads_));
 

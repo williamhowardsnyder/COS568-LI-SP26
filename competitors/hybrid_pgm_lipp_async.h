@@ -5,10 +5,14 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <sstream>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -31,8 +35,12 @@
 //      expensive structure, check a cheap approximate-membership filter.
 //   4. Workload-tunable flush threshold: use an absolute key-count cutoff so a
 //      threshold like 64K has the same meaning on every dataset.
+//   5. Workload-tunable Bloom FPR: expose the filter false-positive rate as a
+//      benchmark knob so lookup-heavy runs can trade cache footprint against
+//      unnecessary DPGM/LIPP probes.
 template <class KeyType, class SearchClass, size_t pgm_error,
-          size_t flush_threshold_keys = 100000>
+          size_t flush_threshold_keys = 100000,
+          size_t bloom_fpr_per_thousand = 10>
 class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   using PGMType = PGMIndex<KeyType, SearchClass, pgm_error, 16>;
   using DPGMType = DynamicPGMIndex<KeyType, uint64_t, SearchClass, PGMType>;
@@ -62,6 +70,7 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
     }
     flush_cv_.notify_one();
     if (flush_thread_.joinable()) flush_thread_.join();
+    WriteLookupCounters();
   }
 
   uint64_t Build(const std::vector<KeyValue<KeyType>>& data, size_t num_threads) {
@@ -86,18 +95,13 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
     active_count_ = 0;
     flush_threshold_ = std::max(size_t(1), flush_threshold_keys);
     flushing_.store(false, std::memory_order_release);
+    did_build_ = true;
+    ResetCounters();
 
     size_t expected_per_flush = std::max(size_t(1000), flush_threshold_);
-    // 5% FPR keeps the filter at ~1 bit/element instead of 10, so for a
-    // 262K-entry buffer the filter stays ≤262KB and fits in L2 cache.
-    // Cost: ~5% false-positive DPGM traversals, which is cheap vs an L3 miss.
-    // 20% FPR keeps the filter at 128KB (2048 blocks after power-of-2 rounding
-    // for threshold=262K), which fits in L2 cache.  Compared with 5% FPR
-    // (512KB, L3), the probe is ~30ns cheaper per lookup.  The extra false
-    // positives (20% vs 5%) cost ~0.15 * DPGM_search_cost per lookup — less
-    // than the 30ns bloom savings when DPGM is small.
-    active_bloom_.init(expected_per_flush, 0.20);
-    shadow_bloom_.init(expected_per_flush, 0.20);
+    const double bloom_fpr = BloomFpr();
+    active_bloom_.init(expected_per_flush, bloom_fpr);
+    shadow_bloom_.init(expected_per_flush, bloom_fpr);
 
     uint64_t build_time = util::timing([&] {
       base_lipp_.bulk_load(loading_data.data(),
@@ -107,10 +111,19 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   }
 
   size_t EqualityLookup(const KeyType& lookup_key, uint32_t thread_id) const {
+    lookup_total_.fetch_add(1, std::memory_order_relaxed);
+
     // New inserts live in the foreground DPGM.
-    if (active_count_ > 0 && active_bloom_.probably_contains(lookup_key)) {
-      auto it = active_dpgm_.find(lookup_key);
-      if (it != active_dpgm_.end()) return it->value();
+    if (active_count_ > 0) {
+      active_bloom_checks_.fetch_add(1, std::memory_order_relaxed);
+      if (active_bloom_.probably_contains(lookup_key)) {
+        active_bloom_positive_.fetch_add(1, std::memory_order_relaxed);
+        auto it = active_dpgm_.find(lookup_key);
+        if (it != active_dpgm_.end()) {
+          active_hits_.fetch_add(1, std::memory_order_relaxed);
+          return it->value();
+        }
+      }
     }
 
     // During a flush, hold shared locks across the shadow and delta checks so
@@ -119,26 +132,50 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
       std::shared_lock<std::shared_mutex> shadow_lock(shadow_smutex_);
       std::shared_lock<std::shared_mutex> delta_lock(delta_smutex_);
 
-      if (shadow_count_ > 0 && shadow_bloom_.probably_contains(lookup_key)) {
-        auto it = shadow_dpgm_.find(lookup_key);
-        if (it != shadow_dpgm_.end()) return it->value();
+      if (shadow_count_ > 0) {
+        shadow_bloom_checks_.fetch_add(1, std::memory_order_relaxed);
+        if (shadow_bloom_.probably_contains(lookup_key)) {
+          shadow_bloom_positive_.fetch_add(1, std::memory_order_relaxed);
+          auto it = shadow_dpgm_.find(lookup_key);
+          if (it != shadow_dpgm_.end()) {
+            shadow_hits_.fetch_add(1, std::memory_order_relaxed);
+            return it->value();
+          }
+        }
       }
 
-      if (delta_run_ && delta_run_->count > 0 &&
-          delta_run_->bloom.probably_contains(static_cast<uint64_t>(lookup_key))) {
-        uint64_t value;
-        if (delta_run_->lipp.find(lookup_key, value)) return value;
+      if (delta_run_ && delta_run_->count > 0) {
+        delta_bloom_checks_.fetch_add(1, std::memory_order_relaxed);
+        if (delta_run_->bloom.probably_contains(static_cast<uint64_t>(lookup_key))) {
+          delta_bloom_positive_.fetch_add(1, std::memory_order_relaxed);
+          uint64_t value;
+          if (delta_run_->lipp.find(lookup_key, value)) {
+            delta_hits_.fetch_add(1, std::memory_order_relaxed);
+            return value;
+          }
+        }
       }
     } else {
-      if (delta_run_ && delta_run_->count > 0 &&
-          delta_run_->bloom.probably_contains(static_cast<uint64_t>(lookup_key))) {
-        uint64_t value;
-        if (delta_run_->lipp.find(lookup_key, value)) return value;
+      if (delta_run_ && delta_run_->count > 0) {
+        delta_bloom_checks_.fetch_add(1, std::memory_order_relaxed);
+        if (delta_run_->bloom.probably_contains(static_cast<uint64_t>(lookup_key))) {
+          delta_bloom_positive_.fetch_add(1, std::memory_order_relaxed);
+          uint64_t value;
+          if (delta_run_->lipp.find(lookup_key, value)) {
+            delta_hits_.fetch_add(1, std::memory_order_relaxed);
+            return value;
+          }
+        }
       }
     }
 
+    base_probes_.fetch_add(1, std::memory_order_relaxed);
     uint64_t value;
-    if (base_lipp_.find(lookup_key, value)) return value;
+    if (base_lipp_.find(lookup_key, value)) {
+      base_hits_.fetch_add(1, std::memory_order_relaxed);
+      return value;
+    }
+    lookup_not_found_.fetch_add(1, std::memory_order_relaxed);
     return util::NOT_FOUND;
   }
 
@@ -206,6 +243,7 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
         active_bloom_.reset();
       }
       active_count_ = 0;
+      flush_count_.fetch_add(1, std::memory_order_relaxed);
       flushing_.store(true, std::memory_order_release);
       {
         std::lock_guard<std::mutex> lk(flush_cv_mutex_);
@@ -238,12 +276,100 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
 
   std::vector<std::string> variants() const {
     return {SearchClass::name(), std::to_string(pgm_error),
-            std::to_string(flush_threshold_keys)};
+            std::to_string(flush_threshold_keys), BloomFprString()};
+  }
+
+  void set_benchmark_context(const std::string& workload_name,
+                             size_t repeat_ordinal) {
+    workload_name_ = workload_name;
+    repeat_ordinal_ = repeat_ordinal;
   }
 
  private:
+  static constexpr double BloomFpr() {
+    return static_cast<double>(bloom_fpr_per_thousand) / 1000.0;
+  }
+
+  static std::string BloomFprString() {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(3) << BloomFpr();
+    return out.str();
+  }
+
+  static std::mutex& LookupCounterFileMutex() {
+    static std::mutex file_mutex;
+    return file_mutex;
+  }
+
   static KeyType MinKey() {
     return std::numeric_limits<KeyType>::lowest();
+  }
+
+  void ResetCounters() {
+    lookup_total_.store(0, std::memory_order_relaxed);
+    active_bloom_checks_.store(0, std::memory_order_relaxed);
+    active_bloom_positive_.store(0, std::memory_order_relaxed);
+    active_hits_.store(0, std::memory_order_relaxed);
+    shadow_bloom_checks_.store(0, std::memory_order_relaxed);
+    shadow_bloom_positive_.store(0, std::memory_order_relaxed);
+    shadow_hits_.store(0, std::memory_order_relaxed);
+    delta_bloom_checks_.store(0, std::memory_order_relaxed);
+    delta_bloom_positive_.store(0, std::memory_order_relaxed);
+    delta_hits_.store(0, std::memory_order_relaxed);
+    base_probes_.store(0, std::memory_order_relaxed);
+    base_hits_.store(0, std::memory_order_relaxed);
+    lookup_not_found_.store(0, std::memory_order_relaxed);
+    flush_count_.store(0, std::memory_order_relaxed);
+    delta_build_count_.store(0, std::memory_order_relaxed);
+  }
+
+  void WriteLookupCounters() const {
+    if (!did_build_ || workload_name_.empty()) return;
+
+    const uint64_t lookup_total = lookup_total_.load(std::memory_order_relaxed);
+    if (lookup_total == 0) return;
+
+    const std::string filename = "./results/hybrid_async_lookup_counters.csv";
+
+    std::lock_guard<std::mutex> lock(LookupCounterFileMutex());
+
+    std::ifstream fin(filename);
+    const bool needs_header =
+        !fin.good() || fin.peek() == std::ifstream::traits_type::eof();
+    fin.close();
+
+    std::ofstream fout(filename, std::ofstream::out | std::ofstream::app);
+    if (!fout.is_open()) return;
+
+    if (needs_header) {
+      fout << "workload,index_name,repeat_ordinal,search_method,pgm_error,"
+              "flush_threshold_keys,bloom_fpr,lookup_total,"
+              "active_bloom_checks,active_bloom_positive,active_hits,"
+              "shadow_bloom_checks,shadow_bloom_positive,shadow_hits,"
+              "delta_bloom_checks,delta_bloom_positive,delta_hits,"
+              "base_probes,base_hits,lookup_not_found,flush_count,"
+              "delta_build_count"
+           << std::endl;
+    }
+
+    fout << workload_name_ << "," << name() << "," << repeat_ordinal_ << ","
+         << SearchClass::name() << "," << pgm_error << ","
+         << flush_threshold_keys << "," << BloomFprString() << ","
+         << lookup_total << ","
+         << active_bloom_checks_.load(std::memory_order_relaxed) << ","
+         << active_bloom_positive_.load(std::memory_order_relaxed) << ","
+         << active_hits_.load(std::memory_order_relaxed) << ","
+         << shadow_bloom_checks_.load(std::memory_order_relaxed) << ","
+         << shadow_bloom_positive_.load(std::memory_order_relaxed) << ","
+         << shadow_hits_.load(std::memory_order_relaxed) << ","
+         << delta_bloom_checks_.load(std::memory_order_relaxed) << ","
+         << delta_bloom_positive_.load(std::memory_order_relaxed) << ","
+         << delta_hits_.load(std::memory_order_relaxed) << ","
+         << base_probes_.load(std::memory_order_relaxed) << ","
+         << base_hits_.load(std::memory_order_relaxed) << ","
+         << lookup_not_found_.load(std::memory_order_relaxed) << ","
+         << flush_count_.load(std::memory_order_relaxed) << ","
+         << delta_build_count_.load(std::memory_order_relaxed) << std::endl;
   }
 
   std::shared_ptr<DeltaRun> BuildDeltaRunFromShadowAndPrevious() const {
@@ -301,7 +427,8 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
 
     auto next_delta = std::make_shared<DeltaRun>();
     next_delta->count = merged.size();
-    next_delta->bloom.init(std::max(size_t(1000), next_delta->count));
+    next_delta->bloom.init(std::max(size_t(1000), next_delta->count),
+                           BloomFpr());
     for (const auto& kv : merged) {
       next_delta->bloom.insert(static_cast<uint64_t>(kv.first));
     }
@@ -334,6 +461,7 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
       if (do_flush) {
         auto next_delta = BuildDeltaRunFromShadowAndPrevious();
         PublishDeltaRun(std::move(next_delta));
+        delta_build_count_.fetch_add(1, std::memory_order_relaxed);
         flushing_.store(false, std::memory_order_release);
       }
 
@@ -359,6 +487,26 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   std::thread flush_thread_;
   std::mutex flush_cv_mutex_;
   std::condition_variable flush_cv_;
+
+  std::string workload_name_;
+  size_t repeat_ordinal_ = 0;
+  bool did_build_ = false;
+
+  mutable std::atomic<uint64_t> lookup_total_{0};
+  mutable std::atomic<uint64_t> active_bloom_checks_{0};
+  mutable std::atomic<uint64_t> active_bloom_positive_{0};
+  mutable std::atomic<uint64_t> active_hits_{0};
+  mutable std::atomic<uint64_t> shadow_bloom_checks_{0};
+  mutable std::atomic<uint64_t> shadow_bloom_positive_{0};
+  mutable std::atomic<uint64_t> shadow_hits_{0};
+  mutable std::atomic<uint64_t> delta_bloom_checks_{0};
+  mutable std::atomic<uint64_t> delta_bloom_positive_{0};
+  mutable std::atomic<uint64_t> delta_hits_{0};
+  mutable std::atomic<uint64_t> base_probes_{0};
+  mutable std::atomic<uint64_t> base_hits_{0};
+  mutable std::atomic<uint64_t> lookup_not_found_{0};
+  std::atomic<uint64_t> flush_count_{0};
+  std::atomic<uint64_t> delta_build_count_{0};
 
   size_t active_count_ = 0;
   size_t shadow_count_ = 0;
