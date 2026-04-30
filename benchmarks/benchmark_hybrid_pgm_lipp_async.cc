@@ -7,14 +7,9 @@
 // ---------------------------------------------------------------------------
 // Pareto sweep: pgm_error × fixed flush_threshold_keys × bloom_fpr.
 //
-// Absolute thresholds make the hybrid much easier to reason about than a
-// moving "percent of total keys" rule:
-//   32K  → frequent flushes, very small DPGM
-//   64K  → moderate lookup-heavy setting
-//   128K → a single flush on the 90%Lkp/10%Ins workload
-//   256K+→ no flush at all on the 90%Lkp/10%Ins workload
-//
 // Bloom FPR is encoded "per thousand":
+//   1   → 0.1%
+//   2   → 0.2%
 //   5   → 0.5%
 //   10  → 1.0%
 //   50  → 5.0%
@@ -34,6 +29,22 @@ void run_hybrid_async_fpr_sweep(tli::Benchmark<uint64_t>& benchmark) {
   benchmark.template Run<
       HybridPGMLIPPAsync<uint64_t, Searcher, pgm_error, flush_threshold_keys>>(
       {200});
+}
+
+template <typename Searcher, size_t pgm_error, size_t flush_threshold_keys>
+void run_hybrid_async_lookup_fpr_sweep(tli::Benchmark<uint64_t>& benchmark) {
+  benchmark.template Run<
+      HybridPGMLIPPAsync<uint64_t, Searcher, pgm_error, flush_threshold_keys>>(
+      {1});
+  benchmark.template Run<
+      HybridPGMLIPPAsync<uint64_t, Searcher, pgm_error, flush_threshold_keys>>(
+      {2});
+  benchmark.template Run<
+      HybridPGMLIPPAsync<uint64_t, Searcher, pgm_error, flush_threshold_keys>>(
+      {5});
+  benchmark.template Run<
+      HybridPGMLIPPAsync<uint64_t, Searcher, pgm_error, flush_threshold_keys>>(
+      {10});
 }
 
 template <typename Searcher>
@@ -61,38 +72,35 @@ void benchmark_64_hybrid_pgm_lipp_async(tli::Benchmark<uint64_t>& benchmark,
 template <int record>
 void benchmark_64_hybrid_pgm_lipp_async(tli::Benchmark<uint64_t>& benchmark,
                                           const std::string& filename) {
-  // Lookup-heavy: cover both "keep the DPGM tiny" and "flush infrequently"
-  // regimes, since the README explicitly warns that too-frequent flushing may
-  // hurt this workload.
-  // Thresholds above 200K mean "no flush" on this workload, which is useful
-  // right now because it isolates the active bloom/DPGM front-buffer cost.
-  // We sweep a coarse set of FPRs here to see whether the current bottleneck is
-  // false positives rather than migration frequency.
+  // Lookup-heavy: keep the sweep focused on the current best region:
+  // higher pgm_error values, no-flush thresholds, and low bloom FPRs.
+  // On the 90% lookup / 10% insert workload, 262144 and 393216 both avoid
+  // flushing during the measured window, which isolates the front-buffer cost.
   auto run_lookup_heavy = [&]() {
-    run_hybrid_async_fpr_sweep<BranchingBinarySearch<record>, 64, 262144>(
-        benchmark);
-    run_hybrid_async_fpr_sweep<BranchingBinarySearch<record>, 64, 393216>(
-        benchmark);
-    run_hybrid_async_fpr_sweep<BranchingBinarySearch<record>, 128, 262144>(
-        benchmark);
-    run_hybrid_async_fpr_sweep<BranchingBinarySearch<record>, 128, 393216>(
-        benchmark);
-    run_hybrid_async_fpr_sweep<BranchingBinarySearch<record>, 256, 262144>(
-        benchmark);
-    run_hybrid_async_fpr_sweep<BranchingBinarySearch<record>, 256, 393216>(
-        benchmark);
-    run_hybrid_async_fpr_sweep<BranchingBinarySearch<record>, 512, 262144>(
-        benchmark);
-    run_hybrid_async_fpr_sweep<BranchingBinarySearch<record>, 512, 393216>(
-        benchmark);
-    run_hybrid_async_fpr_sweep<BranchingBinarySearch<record>, 1024, 262144>(
-        benchmark);
-    run_hybrid_async_fpr_sweep<BranchingBinarySearch<record>, 1024, 393216>(
-        benchmark);
+    run_hybrid_async_lookup_fpr_sweep<BranchingBinarySearch<record>, 256,
+                                      262144>(benchmark);
+    run_hybrid_async_lookup_fpr_sweep<BranchingBinarySearch<record>, 256,
+                                      393216>(benchmark);
+    run_hybrid_async_lookup_fpr_sweep<BranchingBinarySearch<record>, 512,
+                                      262144>(benchmark);
+    run_hybrid_async_lookup_fpr_sweep<BranchingBinarySearch<record>, 512,
+                                      393216>(benchmark);
+    run_hybrid_async_lookup_fpr_sweep<BranchingBinarySearch<record>, 1024,
+                                      262144>(benchmark);
+    run_hybrid_async_lookup_fpr_sweep<BranchingBinarySearch<record>, 1024,
+                                      393216>(benchmark);
+    run_hybrid_async_lookup_fpr_sweep<BranchingBinarySearch<record>, 2048,
+                                      262144>(benchmark);
+    run_hybrid_async_lookup_fpr_sweep<BranchingBinarySearch<record>, 2048,
+                                      393216>(benchmark);
+    run_hybrid_async_lookup_fpr_sweep<BranchingBinarySearch<record>, 4096,
+                                      262144>(benchmark);
+    run_hybrid_async_lookup_fpr_sweep<BranchingBinarySearch<record>, 4096,
+                                      393216>(benchmark);
   };
 
   // Insert-heavy: larger buffers reduce flush churn, but still trigger enough
-  // migrations during 1.8M inserts to exercise the hybrid design.  Keep a
+  // migrations during 1.8M inserts to exercise the hybrid design. Keep a
   // smaller FPR sweep here so we do not explode the total benchmark count.
   auto run_insert_heavy = [&]() {
     benchmark.template Run<
