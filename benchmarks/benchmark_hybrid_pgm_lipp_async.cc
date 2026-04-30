@@ -46,14 +46,18 @@ void benchmark_64_hybrid_pgm_lipp_async(tli::Benchmark<uint64_t>& benchmark,
   // flush.  Thresholds above 200K mean no flush → no delta_run_ → single bloom
   // check per lookup.  Also test 300K/400K to confirm the no-flush sweet spot.
   auto run_lookup_heavy = [&]() {
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64,  65536>>();
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64, 131072>>();
+    // pgm_error=64,128: original configs
     benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64, 262144>>();
     benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>,  64, 393216>>();
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128,  65536>>();
-    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 131072>>();
     benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 262144>>();
     benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 128, 393216>>();
+    // pgm_error=256,512,1024: larger segments → fewer DPGM merges → lower insert cost
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 256, 262144>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 256, 393216>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 512, 262144>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 512, 393216>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 1024, 262144>>();
+    benchmark.template Run<HybridPGMLIPPAsync<uint64_t, BranchingBinarySearch<record>, 1024, 393216>>();
   };
 
   // Insert-heavy: larger buffers reduce flush churn, but still trigger enough

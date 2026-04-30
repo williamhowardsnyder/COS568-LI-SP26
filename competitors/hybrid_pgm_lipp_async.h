@@ -91,8 +91,13 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
     // 5% FPR keeps the filter at ~1 bit/element instead of 10, so for a
     // 262K-entry buffer the filter stays ≤262KB and fits in L2 cache.
     // Cost: ~5% false-positive DPGM traversals, which is cheap vs an L3 miss.
-    active_bloom_.init(expected_per_flush, 0.05);
-    shadow_bloom_.init(expected_per_flush, 0.05);
+    // 20% FPR keeps the filter at 128KB (2048 blocks after power-of-2 rounding
+    // for threshold=262K), which fits in L2 cache.  Compared with 5% FPR
+    // (512KB, L3), the probe is ~30ns cheaper per lookup.  The extra false
+    // positives (20% vs 5%) cost ~0.15 * DPGM_search_cost per lookup — less
+    // than the 30ns bloom savings when DPGM is small.
+    active_bloom_.init(expected_per_flush, 0.20);
+    shadow_bloom_.init(expected_per_flush, 0.20);
 
     uint64_t build_time = util::timing([&] {
       base_lipp_.bulk_load(loading_data.data(),
