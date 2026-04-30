@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <condition_variable>
 #include <cstdlib>
 #include <fstream>
@@ -64,6 +65,14 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
           std::max<size_t>(1, static_cast<size_t>(params[0]));
     }
     bloom_fpr_ = static_cast<double>(bloom_fpr_per_thousand_) / 1000.0;
+    const char* counters_env = std::getenv("HYBRID_ASYNC_COUNTERS");
+    if (counters_env != nullptr) {
+      std::string env_value(counters_env);
+      std::transform(env_value.begin(), env_value.end(), env_value.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      counters_enabled_ = !(env_value == "0" || env_value == "false" ||
+                            env_value == "off" || env_value == "no");
+    }
     flush_thread_ = std::thread(&HybridPGMLIPPAsync::RunFlushThread, this);
   }
 
@@ -114,33 +123,33 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   }
 
   size_t EqualityLookup(const KeyType& lookup_key, uint32_t thread_id) const {
-    lookup_total_.fetch_add(1, std::memory_order_relaxed);
+    IncrementCounter(lookup_total_);
 
     if (base_first_lookup_) {
-      base_probes_.fetch_add(1, std::memory_order_relaxed);
+      IncrementCounter(base_probes_);
       uint64_t value;
       if (base_lipp_.find(lookup_key, value)) {
-        base_hits_.fetch_add(1, std::memory_order_relaxed);
+        IncrementCounter(base_hits_);
         return value;
       }
 
       const size_t recent_value = LookupRecentStructures(lookup_key);
       if (recent_value != util::NOT_FOUND) return recent_value;
 
-      lookup_not_found_.fetch_add(1, std::memory_order_relaxed);
+      IncrementCounter(lookup_not_found_);
       return util::NOT_FOUND;
     }
 
     const size_t recent_value = LookupRecentStructures(lookup_key);
     if (recent_value != util::NOT_FOUND) return recent_value;
 
-    base_probes_.fetch_add(1, std::memory_order_relaxed);
+    IncrementCounter(base_probes_);
     uint64_t value;
     if (base_lipp_.find(lookup_key, value)) {
-      base_hits_.fetch_add(1, std::memory_order_relaxed);
+      IncrementCounter(base_hits_);
       return value;
     }
-    lookup_not_found_.fetch_add(1, std::memory_order_relaxed);
+    IncrementCounter(lookup_not_found_);
     return util::NOT_FOUND;
   }
 
@@ -208,7 +217,7 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
         active_bloom_.reset();
       }
       active_count_ = 0;
-      flush_count_.fetch_add(1, std::memory_order_relaxed);
+      IncrementCounter(flush_count_);
       flushing_.store(true, std::memory_order_release);
       {
         std::lock_guard<std::mutex> lk(flush_cv_mutex_);
@@ -269,15 +278,21 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
     return std::numeric_limits<KeyType>::lowest();
   }
 
+  void IncrementCounter(std::atomic<uint64_t>& counter,
+                        uint64_t delta = 1) const {
+    if (!counters_enabled_) return;
+    counter.fetch_add(delta, std::memory_order_relaxed);
+  }
+
   size_t LookupRecentStructures(const KeyType& lookup_key) const {
     // New inserts live in the foreground DPGM.
     if (active_count_ > 0) {
-      active_bloom_checks_.fetch_add(1, std::memory_order_relaxed);
+      IncrementCounter(active_bloom_checks_);
       if (active_bloom_.probably_contains(lookup_key)) {
-        active_bloom_positive_.fetch_add(1, std::memory_order_relaxed);
+        IncrementCounter(active_bloom_positive_);
         auto it = active_dpgm_.find(lookup_key);
         if (it != active_dpgm_.end()) {
-          active_hits_.fetch_add(1, std::memory_order_relaxed);
+          IncrementCounter(active_hits_);
           return it->value();
         }
       }
@@ -290,25 +305,25 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
       std::shared_lock<std::shared_mutex> delta_lock(delta_smutex_);
 
       if (shadow_count_ > 0) {
-        shadow_bloom_checks_.fetch_add(1, std::memory_order_relaxed);
+        IncrementCounter(shadow_bloom_checks_);
         if (shadow_bloom_.probably_contains(lookup_key)) {
-          shadow_bloom_positive_.fetch_add(1, std::memory_order_relaxed);
+          IncrementCounter(shadow_bloom_positive_);
           auto it = shadow_dpgm_.find(lookup_key);
           if (it != shadow_dpgm_.end()) {
-            shadow_hits_.fetch_add(1, std::memory_order_relaxed);
+            IncrementCounter(shadow_hits_);
             return it->value();
           }
         }
       }
 
       if (delta_run_ && delta_run_->count > 0) {
-        delta_bloom_checks_.fetch_add(1, std::memory_order_relaxed);
+        IncrementCounter(delta_bloom_checks_);
         if (delta_run_->bloom.probably_contains(
                 static_cast<uint64_t>(lookup_key))) {
-          delta_bloom_positive_.fetch_add(1, std::memory_order_relaxed);
+          IncrementCounter(delta_bloom_positive_);
           uint64_t value;
           if (delta_run_->lipp.find(lookup_key, value)) {
-            delta_hits_.fetch_add(1, std::memory_order_relaxed);
+            IncrementCounter(delta_hits_);
             return value;
           }
         }
@@ -317,12 +332,12 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
     }
 
     if (delta_run_ && delta_run_->count > 0) {
-      delta_bloom_checks_.fetch_add(1, std::memory_order_relaxed);
+      IncrementCounter(delta_bloom_checks_);
       if (delta_run_->bloom.probably_contains(static_cast<uint64_t>(lookup_key))) {
-        delta_bloom_positive_.fetch_add(1, std::memory_order_relaxed);
+        IncrementCounter(delta_bloom_positive_);
         uint64_t value;
         if (delta_run_->lipp.find(lookup_key, value)) {
-          delta_hits_.fetch_add(1, std::memory_order_relaxed);
+          IncrementCounter(delta_hits_);
           return value;
         }
       }
@@ -331,6 +346,7 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   }
 
   void ResetCounters() {
+    if (!counters_enabled_) return;
     lookup_total_.store(0, std::memory_order_relaxed);
     active_bloom_checks_.store(0, std::memory_order_relaxed);
     active_bloom_positive_.store(0, std::memory_order_relaxed);
@@ -349,6 +365,7 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
   }
 
   void WriteLookupCounters() const {
+    if (!counters_enabled_) return;
     if (!did_build_ || workload_name_.empty()) return;
 
     const uint64_t lookup_total = lookup_total_.load(std::memory_order_relaxed);
@@ -486,7 +503,7 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
       if (do_flush) {
         auto next_delta = BuildDeltaRunFromShadowAndPrevious();
         PublishDeltaRun(std::move(next_delta));
-        delta_build_count_.fetch_add(1, std::memory_order_relaxed);
+        IncrementCounter(delta_build_count_);
         flushing_.store(false, std::memory_order_release);
       }
 
@@ -515,6 +532,7 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
 
   size_t bloom_fpr_per_thousand_ = 10;
   double bloom_fpr_ = 0.010;
+  bool counters_enabled_ = true;
 
   std::string workload_name_;
   size_t repeat_ordinal_ = 0;
