@@ -88,8 +88,11 @@ class HybridPGMLIPPAsync : public Competitor<KeyType, SearchClass> {
     flushing_.store(false, std::memory_order_release);
 
     size_t expected_per_flush = std::max(size_t(1000), flush_threshold_);
-    active_bloom_.init(expected_per_flush);
-    shadow_bloom_.init(expected_per_flush);
+    // 5% FPR keeps the filter at ~1 bit/element instead of 10, so for a
+    // 262K-entry buffer the filter stays ≤262KB and fits in L2 cache.
+    // Cost: ~5% false-positive DPGM traversals, which is cheap vs an L3 miss.
+    active_bloom_.init(expected_per_flush, 0.05);
+    shadow_bloom_.init(expected_per_flush, 0.05);
 
     uint64_t build_time = util::timing([&] {
       base_lipp_.bulk_load(loading_data.data(),
